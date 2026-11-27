@@ -6,9 +6,11 @@ import sqlite3
 import hashlib
 import secrets
 import re
+import html
+import matplotlib.pyplot as plt
+
 from io import BytesIO
 from datetime import datetime
-
 from pathlib import Path
 from PIL import Image
 
@@ -19,7 +21,7 @@ from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import mm
 from reportlab.platypus import (
     SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle,
-    Image as ReportLabImage, KeepTogether
+    Image as ReportLabImage
 )
 
 
@@ -49,7 +51,9 @@ DATABASE_PATH = Path("users.db")
 # ================================================
 
 def initialize_database():
+
     with sqlite3.connect(DATABASE_PATH) as connection:
+
         connection.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -60,8 +64,22 @@ def initialize_database():
             )
         """)
 
+        connection.execute("""
+            CREATE TABLE IF NOT EXISTS plant_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                plant_name TEXT NOT NULL,
+                disease_name TEXT NOT NULL,
+                confidence REAL NOT NULL,
+                image_name TEXT,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (user_id) REFERENCES users(id)
+            )
+        """)
+
 
 def hash_password(password, salt):
+
     return hashlib.pbkdf2_hmac(
         "sha256",
         password.encode("utf-8"),
@@ -71,11 +89,14 @@ def hash_password(password, salt):
 
 
 def register_user(name, email, password):
+
     salt = secrets.token_hex(16)
     password_hash = hash_password(password, salt)
 
     try:
+
         with sqlite3.connect(DATABASE_PATH) as connection:
+
             connection.execute(
                 """
                 INSERT INTO users
@@ -84,17 +105,21 @@ def register_user(name, email, password):
                 """,
                 (name, email, password_hash, salt)
             )
+
         return True, "Account created successfully!"
 
     except sqlite3.IntegrityError:
+
         return False, "An account with this email already exists."
 
 
 def authenticate_user(email, password):
+
     with sqlite3.connect(DATABASE_PATH) as connection:
+
         user = connection.execute(
             """
-            SELECT name, password_hash, salt
+            SELECT id, name, password_hash, salt
             FROM users
             WHERE email = ?
             """,
@@ -104,16 +129,86 @@ def authenticate_user(email, password):
     if user is None:
         return None
 
-    name, stored_hash, salt = user
+    user_id, name, stored_hash, salt = user
     entered_hash = hash_password(password, salt)
 
     if secrets.compare_digest(entered_hash, stored_hash):
-        return name
+
+        return {
+            "id": user_id,
+            "name": name
+        }
 
     return None
 
 
 initialize_database()
+
+
+# ================================================
+# PLANT HEALTH HISTORY
+# ================================================
+
+def save_plant_history(
+    user_id,
+    plant_name,
+    disease_name,
+    confidence,
+    image_name
+):
+
+    current_time = datetime.now().strftime(
+        "%Y-%m-%d %H:%M:%S"
+    )
+
+    with sqlite3.connect(DATABASE_PATH) as connection:
+
+        connection.execute(
+            """
+            INSERT INTO plant_history (
+                user_id,
+                plant_name,
+                disease_name,
+                confidence,
+                image_name,
+                created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                user_id,
+                plant_name,
+                disease_name,
+                confidence,
+                image_name,
+                current_time
+            )
+        )
+
+
+def get_plant_history(user_id):
+
+    with sqlite3.connect(DATABASE_PATH) as connection:
+
+        connection.row_factory = sqlite3.Row
+
+        records = connection.execute(
+            """
+            SELECT
+                id,
+                plant_name,
+                disease_name,
+                confidence,
+                image_name,
+                created_at
+            FROM plant_history
+            WHERE user_id = ?
+            ORDER BY id DESC
+            """,
+            (user_id,)
+        ).fetchall()
+
+    return [dict(record) for record in records]
 
 
 # ================================================
@@ -126,6 +221,15 @@ if "authenticated" not in st.session_state:
 if "user_name" not in st.session_state:
     st.session_state.user_name = ""
 
+if "user_id" not in st.session_state:
+    st.session_state.user_id = None
+
+if "last_analysis" not in st.session_state:
+    st.session_state.last_analysis = None
+
+if "login_success" not in st.session_state:
+    st.session_state.login_success = False
+
 
 # ================================================
 # LOAD TRAINED MODEL
@@ -133,6 +237,7 @@ if "user_name" not in st.session_state:
 
 @st.cache_resource
 def load_leaf_model():
+
     if not MODEL_PATH.exists():
         raise FileNotFoundError(
             "Trained model not found: model/best_leaf_model.keras"
@@ -164,20 +269,24 @@ def load_leaf_model():
 # ================================================
 
 def preprocess_leaf_image(image):
+
     image = image.convert("RGB")
+
     image = image.resize(
         (224, 224),
         Image.Resampling.BILINEAR
     )
 
-    image_array = np.array(image, dtype=np.float32)
+    image_array = np.array(
+        image,
+        dtype=np.float32
+    )
 
     image_array = tf.keras.applications.mobilenet_v2.preprocess_input(
         image_array
     )
 
-    image_array = np.expand_dims(image_array, axis=0)
-    return image_array
+    return np.expand_dims(image_array, axis=0)
 
 
 # ================================================
@@ -185,22 +294,274 @@ def preprocess_leaf_image(image):
 # ================================================
 
 def format_prediction(label):
-    parts = label.split("__", 1)
 
-    if len(parts) == 2:
-        plant = parts[0].capitalize()
-        disease = parts[1]
+    label = str(label).strip()
+
+    if "___" in label:
+
+        plant, disease = label.split("___", 1)
+
+    elif "__" in label:
+
+        plant, disease = label.split("__", 1)
+
     else:
+
         plant = "Unknown"
         disease = label
 
-    if disease.startswith("Tomato___"):
-        disease = disease.replace("Tomato___", "", 1)
-    elif disease.startswith("Potato___"):
-        disease = disease.replace("Potato___", "", 1)
+    plant = plant.strip().capitalize()
+    disease = disease.replace("_", " ").strip()
 
-    disease = disease.replace("_", " ")
     return plant, disease
+
+
+# ================================================
+# FORMAT OLD HISTORY DISEASE NAMES
+# ================================================
+
+def format_history_disease(disease_name):
+
+    raw = str(disease_name).strip()
+
+    if not raw:
+        return "Unknown"
+
+    if "___" in raw:
+
+        disease = raw.split("___", 1)[1]
+
+    elif "__" in raw:
+
+        disease = raw.split("__", 1)[1]
+
+    else:
+
+        disease = raw
+
+    disease = disease.replace("_", " ").strip()
+
+    if disease.lower() == "healthy":
+        return "Healthy"
+
+    return disease.title()
+
+
+# ================================================
+# GRAD-CAM MODEL
+# ================================================
+
+@st.cache_resource
+def load_gradcam_model():
+
+    model, _ = load_leaf_model()
+
+    backbone = None
+
+    for layer in model.layers:
+
+        if isinstance(layer, tf.keras.Model):
+
+            if len(layer.output.shape) == 4:
+                backbone = layer
+                break
+
+    if backbone is None:
+        raise ValueError(
+            "MobileNetV2 backbone not found inside the trained model."
+        )
+
+    try:
+
+        last_conv_layer = backbone.get_layer("out_relu")
+
+    except ValueError:
+
+        raise ValueError(
+            "The final MobileNetV2 layer 'out_relu' was not found."
+        )
+
+    feature_extractor = tf.keras.Model(
+        inputs=backbone.input,
+        outputs=last_conv_layer.output
+    )
+
+    gap_layer = None
+    dropout_layer = None
+    dense_layer = None
+
+    for layer in model.layers:
+
+        if isinstance(
+            layer,
+            tf.keras.layers.GlobalAveragePooling2D
+        ):
+            gap_layer = layer
+
+        elif isinstance(
+            layer,
+            tf.keras.layers.Dropout
+        ):
+            dropout_layer = layer
+
+        elif isinstance(
+            layer,
+            tf.keras.layers.Dense
+        ):
+            dense_layer = layer
+
+    if (
+        gap_layer is None
+        or dropout_layer is None
+        or dense_layer is None
+    ):
+        raise ValueError(
+            "Could not find the original classifier layers."
+        )
+
+    return (
+        feature_extractor,
+        gap_layer,
+        dropout_layer,
+        dense_layer
+    )
+
+
+# ================================================
+# GENERATE GRAD-CAM HEATMAP
+# ================================================
+
+def generate_gradcam(image, class_index):
+
+    (
+        feature_extractor,
+        gap_layer,
+        dropout_layer,
+        dense_layer
+    ) = load_gradcam_model()
+
+    processed_image = preprocess_leaf_image(image)
+
+    with tf.GradientTape() as tape:
+
+        feature_maps = feature_extractor(
+            processed_image,
+            training=False
+        )
+
+        x = gap_layer(feature_maps)
+
+        x = dropout_layer(
+            x,
+            training=False
+        )
+
+        predictions = dense_layer(x)
+
+        class_score = predictions[:, class_index]
+
+    gradients = tape.gradient(
+        class_score,
+        feature_maps
+    )
+
+    if gradients is None:
+        raise ValueError(
+            "Grad-CAM gradients could not be calculated."
+        )
+
+    weights = tf.reduce_mean(
+        gradients,
+        axis=(1, 2)
+    )
+
+    heatmap = tf.reduce_sum(
+        feature_maps[0] * weights[0],
+        axis=-1
+    )
+
+    heatmap = tf.maximum(heatmap, 0)
+
+    heatmap_max = tf.reduce_max(heatmap)
+
+    if float(heatmap_max.numpy()) <= 1e-8:
+        raise ValueError(
+            "Grad-CAM produced an empty heatmap."
+        )
+
+    heatmap = heatmap / heatmap_max
+
+    heatmap_array = heatmap.numpy()
+
+    original_image = image.convert("RGB")
+
+    heatmap_image = Image.fromarray(
+        np.uint8(heatmap_array * 255)
+    )
+
+    heatmap_image = heatmap_image.resize(
+        original_image.size,
+        Image.Resampling.BILINEAR
+    )
+
+    heatmap_array = np.asarray(
+        heatmap_image,
+        dtype=np.float32
+    ) / 255.0
+
+    colour_map = plt.get_cmap("jet")
+
+    coloured_heatmap = np.uint8(
+        colour_map(heatmap_array)[:, :, :3] * 255
+    )
+
+    coloured_heatmap_image = Image.fromarray(
+        coloured_heatmap
+    )
+
+    overlay_image = Image.blend(
+        original_image,
+        coloured_heatmap_image,
+        alpha=0.40
+    )
+
+    figure, axis = plt.subplots(figsize=(7, 6))
+
+    axis.imshow(original_image)
+
+    axis.imshow(
+        heatmap_array,
+        cmap="jet",
+        alpha=0.50,
+        vmin=0,
+        vmax=1
+    )
+
+    axis.axis("off")
+    figure.tight_layout(pad=0)
+
+    heatmap_buffer = BytesIO()
+
+    figure.savefig(
+        heatmap_buffer,
+        format="png",
+        bbox_inches="tight",
+        pad_inches=0,
+        dpi=150
+    )
+
+    plt.close(figure)
+
+    heatmap_buffer.seek(0)
+
+    heatmap_visualization = Image.open(
+        heatmap_buffer
+    ).convert("RGB")
+
+    return (
+        heatmap_visualization,
+        overlay_image
+    )
 
 
 # ================================================
@@ -208,6 +569,7 @@ def format_prediction(label):
 # ================================================
 
 disease_information = {
+
     "anthracnose": {
         "symptoms": "Dark, irregular spots or lesions may appear on mango leaves.",
         "cause": "A fungal disease associated with Colletotrichum species.",
@@ -218,6 +580,7 @@ disease_information = {
             "Seek local agricultural advice if symptoms spread."
         ]
     },
+
     "bacterial canker": {
         "symptoms": "Dark lesions and canker-like symptoms may develop on affected mango plant parts.",
         "cause": "A bacterial disease associated with Xanthomonas species.",
@@ -228,6 +591,7 @@ disease_information = {
             "Consult an agricultural expert for confirmation."
         ]
     },
+
     "cutting weevil": {
         "symptoms": "Leaf damage may include irregular cuts or feeding-related injury.",
         "cause": "Feeding damage associated with cutting weevils.",
@@ -238,6 +602,7 @@ disease_information = {
             "Seek local agricultural pest-management advice."
         ]
     },
+
     "die back": {
         "symptoms": "Affected shoots may show drying, discoloration and progressive dieback.",
         "cause": "Can be associated with fungal infection and plant stress.",
@@ -248,6 +613,7 @@ disease_information = {
             "Seek expert advice if symptoms continue."
         ]
     },
+
     "gall midge": {
         "symptoms": "Affected leaves may show abnormal growth, distortion or gall-like damage.",
         "cause": "Insect damage associated with gall midges.",
@@ -258,6 +624,7 @@ disease_information = {
             "Consult a local agricultural specialist."
         ]
     },
+
     "powdery mildew": {
         "symptoms": "White or powder-like patches may appear on leaf surfaces.",
         "cause": "A fungal disease associated with powdery mildew fungi.",
@@ -268,6 +635,7 @@ disease_information = {
             "Seek appropriate local disease-management advice."
         ]
     },
+
     "sooty mould": {
         "symptoms": "Dark, black, soot-like growth may cover leaf surfaces.",
         "cause": "Often associated with honeydew produced by sap-feeding insects.",
@@ -278,6 +646,7 @@ disease_information = {
             "Seek agricultural advice if the condition persists."
         ]
     },
+
     "early blight": {
         "symptoms": "Brown leaf spots may develop with concentric ring patterns.",
         "cause": "A fungal disease associated with Alternaria species.",
@@ -288,6 +657,7 @@ disease_information = {
             "Follow locally recommended disease-management practices."
         ]
     },
+
     "late blight": {
         "symptoms": "Water-soaked-looking lesions may develop and spread rapidly under favourable conditions.",
         "cause": "A destructive disease caused by Phytophthora infestans.",
@@ -298,6 +668,7 @@ disease_information = {
             "Seek prompt agricultural advice because this disease can spread rapidly."
         ]
     },
+
     "bacterial spot": {
         "symptoms": "Small dark spots may appear on leaves, sometimes surrounded by yellow areas.",
         "cause": "A bacterial disease associated with Xanthomonas species.",
@@ -308,6 +679,7 @@ disease_information = {
             "Seek local disease-management guidance."
         ]
     },
+
     "leaf mold": {
         "symptoms": "Yellowish areas may appear on upper leaf surfaces, with mould-like growth underneath.",
         "cause": "A fungal disease associated with Passalora fulva.",
@@ -318,6 +690,7 @@ disease_information = {
             "Monitor the plant regularly."
         ]
     },
+
     "septoria leaf spot": {
         "symptoms": "Numerous small circular spots may develop, sometimes with dark margins.",
         "cause": "A fungal disease associated with Septoria lycopersici.",
@@ -328,6 +701,7 @@ disease_information = {
             "Monitor disease progression."
         ]
     },
+
     "spider mites two-spotted spider mite": {
         "symptoms": "Tiny pale speckles, leaf discoloration and sometimes fine webbing may appear.",
         "cause": "Feeding damage caused by two-spotted spider mites.",
@@ -338,6 +712,7 @@ disease_information = {
             "Seek locally suitable pest-management advice."
         ]
     },
+
     "target spot": {
         "symptoms": "Brown circular lesions with concentric rings may develop on leaves.",
         "cause": "A fungal disease associated with Corynespora cassiicola.",
@@ -348,6 +723,7 @@ disease_information = {
             "Monitor nearby plants."
         ]
     },
+
     "tomato mosaic virus": {
         "symptoms": "Leaves may show mottling, mosaic patterns and distortion.",
         "cause": "A viral disease caused by Tomato mosaic virus.",
@@ -358,6 +734,7 @@ disease_information = {
             "Use healthy planting material."
         ]
     },
+
     "tomato yellow leaf curl virus": {
         "symptoms": "Leaves may curl upward, become yellow and show reduced growth.",
         "cause": "A viral disease transmitted by whiteflies.",
@@ -368,6 +745,7 @@ disease_information = {
             "Seek local agricultural pest-management advice."
         ]
     },
+
     "healthy": {
         "symptoms": "The model predicts that the leaf belongs to the healthy category.",
         "cause": "No target disease was identified by the model.",
@@ -393,7 +771,6 @@ def create_results_pdf(
     top_predictions,
     info
 ):
-    """Create a PDF report in memory and return its bytes."""
 
     pdf_buffer = BytesIO()
 
@@ -473,9 +850,14 @@ def create_results_pdf(
         body_style
     ))
 
-    # Add the uploaded image to the report.
     image_buffer = BytesIO()
-    image.convert("RGB").save(image_buffer, format="JPEG", quality=90)
+
+    image.convert("RGB").save(
+        image_buffer,
+        format="JPEG",
+        quality=90
+    )
+
     image_buffer.seek(0)
 
     report_image = ReportLabImage(
@@ -484,11 +866,19 @@ def create_results_pdf(
         height=65 * mm,
         kind="proportional"
     )
-    story.append(Paragraph("Uploaded Leaf Image", section_style))
+
+    story.append(Paragraph(
+        "Uploaded Leaf Image",
+        section_style
+    ))
+
     story.append(report_image)
     story.append(Spacer(1, 8))
 
-    story.append(Paragraph("Prediction Results", section_style))
+    story.append(Paragraph(
+        "Prediction Results",
+        section_style
+    ))
 
     result_data = [
         ["Predicted Plant", plant_name],
@@ -517,10 +907,17 @@ def create_results_pdf(
 
     story.append(result_table)
 
-    story.append(Paragraph("Top 3 Model Predictions", section_style))
+    story.append(Paragraph(
+        "Top 3 Model Predictions",
+        section_style
+    ))
 
-    top_data = [["Plant", "Predicted Category", "Probability"]]
+    top_data = [
+        ["Plant", "Predicted Category", "Probability"]
+    ]
+
     for prediction in top_predictions:
+
         top_data.append([
             prediction["plant"],
             prediction["disease"],
@@ -555,27 +952,35 @@ def create_results_pdf(
     story.append(Paragraph("Possible Cause", section_style))
     story.append(Paragraph(info["cause"], body_style))
 
-    story.append(Paragraph("General Care Recommendations", section_style))
+    story.append(Paragraph(
+        "General Care Recommendations",
+        section_style
+    ))
+
     for recommendation in info["care"]:
+
         story.append(Paragraph(
             f"&bull; {recommendation}",
             body_style
         ))
 
     story.append(Spacer(1, 12))
+
     story.append(Paragraph(
-        "Note: Model confidence is the model's output probability and "
-        "is not a guarantee of diagnostic correctness.",
+        "Note: Model confidence is the model's output probability "
+        "and is not a guarantee of diagnostic correctness.",
         small_style
     ))
 
     document.build(story)
+
     pdf_buffer.seek(0)
+
     return pdf_buffer.getvalue()
 
 
 # ================================================
-# CUSTOM DESIGN - ORIGINAL NEON UI
+# CUSTOM DESIGN - NEON UI
 # ================================================
 
 st.markdown("""
@@ -659,31 +1064,69 @@ header, footer, #MainMenu {
     font-weight: 600;
 }
 
+/* LOGIN CARD: DARK BACKGROUND + NEON YELLOW BORDER */
+
 .st-key-login_card {
-    background: rgba(8, 15, 17, 0.96);
-    border: 2px solid #EFFF38;
+    background: #0B1511 !important;
+    border: 2px solid #EFFF38 !important;
     border-radius: 25px;
     padding: 28px;
     box-shadow:
-        inset 0 0 18px rgba(255,255,255,0.18),
         0 0 12px #EFFF38,
-        0 0 35px rgba(239,255,56,0.25);
+        0 0 25px rgba(239,255,56,0.45),
+        0 0 40px rgba(239,255,56,0.20);
 }
 
-.welcome {
+.st-key-login_card p,
+.st-key-login_card label,
+.st-key-login_card [data-testid="stWidgetLabel"] p {
+    color: #FFFFFF !important;
+}
+
+.st-key-login_card .welcome {
     text-align: center;
-    color: white;
+    color: #EFFF38 !important;
     font-size: 30px;
     font-weight: 800;
     margin-top: 10px;
 }
 
-.subtitle {
+.st-key-login_card .subtitle {
     text-align: center;
-    color: #cbd6ce;
+    color: #D0DCCF !important;
     font-size: 14px;
     margin-bottom: 20px;
 }
+
+.st-key-login_card .stTextInput input {
+    background: #17251E !important;
+    color: #FFFFFF !important;
+    border: 1px solid #EFFF38 !important;
+    border-radius: 30px !important;
+    min-height: 45px;
+}
+
+.st-key-login_card .stTextInput input::placeholder {
+    color: #AAB8AC !important;
+}
+
+.st-key-login_card .stTabs [data-baseweb="tab"] {
+    background: #17251E !important;
+    color: #FFFFFF !important;
+    border: 1px solid #66745D !important;
+}
+
+.st-key-login_card .stTabs [data-baseweb="tab"][aria-selected="true"] {
+    background: #29351B !important;
+    color: #EFFF38 !important;
+    border: 2px solid #EFFF38 !important;
+}
+
+.st-key-login_card .footer {
+    color: #C0CBBF !important;
+}
+
+/* GENERAL INPUTS */
 
 .stTextInput label {
     color: white !important;
@@ -713,6 +1156,8 @@ header, footer, #MainMenu {
     font-size: 16px !important;
     box-shadow: 0 0 14px #ff4fa380, 0 0 18px #efff3860;
 }
+
+/* TABS */
 
 .stTabs [data-baseweb="tab-list"] {
     display: flex;
@@ -785,6 +1230,59 @@ div[data-testid="stFileUploader"] label {
     min-height: 45px;
 }
 
+/* HISTORY CARDS: EXTRA DARK TEXT */
+
+.history-card {
+    background: #FFFFFF !important;
+    border: 1px solid #A6B9AA;
+    border-left: 5px solid #176B3A;
+    border-radius: 12px;
+    padding: 17px 20px;
+    margin: 12px 0;
+    color: #071207 !important;
+}
+
+.history-card * {
+    color: #071207 !important;
+}
+
+.history-card .history-title {
+    font-size: 17px;
+    font-weight: 800;
+    margin-bottom: 8px;
+    color: #071207 !important;
+}
+
+.history-card .history-detail {
+    font-size: 14px;
+    margin: 5px 0;
+    color: #101A13 !important;
+}
+
+.history-card .history-confidence {
+    font-size: 15px;
+    font-weight: 800;
+    color: #10552B !important;
+}
+/* ACCOUNT CREATED SUCCESS MESSAGE */
+
+.st-key-login_card [data-testid="stAlert"] {
+    background-color: #DFF5D8 !important;
+    border: 1px solid #8BCF91 !important;
+    border-radius: 10px !important;
+}
+
+.st-key-login_card [data-testid="stAlert"] p,
+.st-key-login_card [data-testid="stAlert"] span,
+.st-key-login_card [data-testid="stAlert"] div {
+    color: #12351F !important;
+    font-weight: 700 !important;
+}
+
+.st-key-login_card [data-testid="stAlert"] svg {
+    fill: #176B3A !important;
+    color: #176B3A !important;
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -810,10 +1308,6 @@ if not st.session_state.authenticated:
         [1.25, 0.85],
         gap="large"
     )
-
-    # --------------------------------
-    # LEFT SIDE - PLANT INFORMATION
-    # --------------------------------
 
     with left_column:
 
@@ -852,7 +1346,7 @@ if not st.session_state.authenticated:
         with plant3:
             st.markdown("""
             <div class="plant-box">
-                🥭­<br>Mango
+                🥭<br>Mango
             </div>
             """, unsafe_allow_html=True)
 
@@ -876,11 +1370,17 @@ if not st.session_state.authenticated:
         <div class="explore-item">
             4. Plant Care Recommendations
         </div>
+
+        <div class="explore-item">
+            5. AI Explainability with Grad-CAM
+        </div>
+
+        <div class="explore-item">
+            6. Plant Health History
+        </div>
         """, unsafe_allow_html=True)
 
-    # --------------------------------
-    # RIGHT SIDE - LOGIN AND REGISTER
-    # --------------------------------
+    # LOGIN AND REGISTER
 
     with right_column:
 
@@ -900,9 +1400,7 @@ if not st.session_state.authenticated:
                 ["LOGIN", "CREATE ACCOUNT"]
             )
 
-            # --------------------------------
             # LOGIN
-            # --------------------------------
 
             with login_tab:
 
@@ -924,31 +1422,35 @@ if not st.session_state.authenticated:
                     if login:
 
                         if not email.strip() or not password:
+
                             st.error(
                                 "Please enter your email and password."
                             )
 
                         else:
 
-                            user_name = authenticate_user(
+                            user = authenticate_user(
                                 email.strip().lower(),
                                 password
                             )
 
-                            if user_name:
+                            if user:
+
                                 st.session_state.authenticated = True
-                                st.session_state.user_name = user_name
-                                st.success("Login successful!")
+                                st.session_state.user_name = user["name"]
+                                st.session_state.user_id = user["id"]
+                                st.session_state.last_analysis = None
+                                st.session_state.login_success = True
+
                                 st.rerun()
 
                             else:
+
                                 st.error(
                                     "Invalid email or password."
                                 )
 
-            # --------------------------------
             # CREATE ACCOUNT
-            # --------------------------------
 
             with register_tab:
 
@@ -988,6 +1490,7 @@ if not st.session_state.authenticated:
                             or not new_password
                             or not confirm_password
                         ):
+
                             st.error(
                                 "Please fill in all the fields."
                             )
@@ -996,16 +1499,19 @@ if not st.session_state.authenticated:
                             r"[^@\s]+@[^@\s]+\.[^@\s]+",
                             new_email.strip()
                         ):
+
                             st.error(
                                 "Please enter a valid email address."
                             )
 
                         elif len(new_password) < 8:
+
                             st.error(
                                 "Password must contain at least 8 characters."
                             )
 
                         elif new_password != confirm_password:
+
                             st.error(
                                 "Passwords do not match."
                             )
@@ -1019,16 +1525,19 @@ if not st.session_state.authenticated:
                             )
 
                             if success:
+
                                 st.success(
                                     "Account created successfully! "
                                     "Please go to LOGIN and sign in."
                                 )
+
                             else:
+
                                 st.error(message)
 
             st.markdown("""
             <div class="footer">
-                GROW SMARTER |· LIVE HEALTHIER<br>
+                GROW SMARTER | LIVE HEALTHIER<br>
                 AI LEAF CARE AND DISEASE DETECTION 🌿
             </div>
             """, unsafe_allow_html=True)
@@ -1040,18 +1549,42 @@ if not st.session_state.authenticated:
 
 else:
 
-    # --------------------------------
-    # DASHBOARD HEADER
-    # --------------------------------
+    # SHOW LOGIN SUCCESS MESSAGE AFTER RERUN
+
+    if st.session_state.login_success:
+
+        st.markdown(
+            """
+            <div style="
+                background-color: #DFF5D8;
+                color: #12351F;
+                border: 1px solid #A5D6A7;
+                padding: 12px 16px;
+                border-radius: 8px;
+                font-weight: 700;
+                ">
+                Login successful! Welcome to your dashboard.
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+
+        st.session_state.login_success = False
 
     welcome_column, logout_column = st.columns([4, 1])
 
     with welcome_column:
+
+        safe_user_name = html.escape(
+            st.session_state.user_name
+        )
+
         st.markdown(
             f"""
             <div class="hero-title">
-                Welcome, {st.session_state.user_name}! 🌿
+                Welcome, {safe_user_name}! 🌿
             </div>
+
             <div class="hero-description">
                 Your plant health dashboard is ready.
                 Upload a leaf image to analyse its health.
@@ -1060,265 +1593,551 @@ else:
             unsafe_allow_html=True
         )
 
+    # ================================================
+    # LOGOUT
+    # ================================================
+
     with logout_column:
+
         if st.button("LOGOUT", use_container_width=True):
+
             st.session_state.authenticated = False
             st.session_state.user_name = ""
+            st.session_state.user_id = None
+            st.session_state.last_analysis = None
+            st.session_state.login_success = False
+
             st.rerun()
 
     st.markdown("---")
 
-    # --------------------------------
-    # AI LEAF ANALYSIS SECTION
-    # --------------------------------
+    analysis_tab, history_tab = st.tabs(
+        [
+            "🌿 LEAF ANALYSIS",
+            "📊 PLANT HEALTH HISTORY"
+        ]
+    )
 
-    st.markdown("""
-    <div class="section-heading">
-        🌿 AI LEAF DISEASE ANALYSIS
-    </div>
+    # ================================================
+    # TAB 1 - LEAF ANALYSIS
+    # ================================================
 
-    <div class="hero-description">
-        Upload a clear photograph of a tomato, potato or mango leaf
-        to receive an AI-generated prediction.
-    </div>
-    """, unsafe_allow_html=True)
+    with analysis_tab:
 
-    upload_column, preview_column = st.columns([1, 1], gap="large")
+        st.markdown("""
+        <div class="section-heading">
+            🌿 AI LEAF DISEASE ANALYSIS
+        </div>
 
-    with upload_column:
+        <div class="hero-description">
+            Upload a clear photograph of a tomato, potato or mango leaf
+            to receive an AI-generated prediction.
+        </div>
+        """, unsafe_allow_html=True)
 
-        uploaded_file = st.file_uploader(
-            "Upload your leaf image",
-            type=["jpg", "jpeg", "png"],
-            help="Upload a clear image of a single leaf."
+        upload_column, preview_column = st.columns(
+            [1, 1],
+            gap="large"
         )
 
-        predict_button = st.button(
-            "🌿 ANALYSE LEAF IMAGE",
-            use_container_width=True
-        )
+        with upload_column:
 
-    with preview_column:
+            uploaded_file = st.file_uploader(
+                "Upload your leaf image",
+                type=["jpg", "jpeg", "png"],
+                help="Upload a clear image of a single leaf.",
+                key="leaf_image_uploader"
+            )
 
-        if uploaded_file is not None:
-            try:
-                uploaded_image = Image.open(
-                    uploaded_file
-                ).convert("RGB")
+            predict_button = st.button(
+                "🌿 ANALYSE LEAF IMAGE",
+                use_container_width=True
+            )
+
+        with preview_column:
+
+            if uploaded_file is not None:
+
+                try:
+
+                    preview_image = Image.open(
+                        BytesIO(uploaded_file.getvalue())
+                    ).convert("RGB")
+
+                    st.image(
+                        preview_image,
+                        caption="Uploaded Leaf Image",
+                        width=300
+                    )
+
+                except Exception:
+
+                    st.error(
+                        "Unable to open this image. Please upload another image."
+                    )
+
+        # RUN MODEL PREDICTION
+
+        if predict_button:
+
+            if uploaded_file is None:
+
+                st.warning(
+                    "Please upload a leaf image first."
+                )
+
+            else:
+
+                try:
+
+                    with st.spinner(
+                        "AI model is analysing your leaf image..."
+                    ):
+
+                        model, class_names = load_leaf_model()
+
+                        image = Image.open(
+                            BytesIO(uploaded_file.getvalue())
+                        ).convert("RGB")
+
+                        processed_image = preprocess_leaf_image(image)
+
+                        probabilities = model.predict(
+                            processed_image,
+                            verbose=0
+                        )[0]
+
+                        predicted_index = int(
+                            np.argmax(probabilities)
+                        )
+
+                        confidence = float(
+                            probabilities[predicted_index]
+                        )
+
+                        predicted_label = class_names[predicted_index]
+
+                        plant_name, disease_name = format_prediction(
+                            predicted_label
+                        )
+
+                        top_indices = np.argsort(
+                            probabilities
+                        )[::-1][:3]
+
+                        top_predictions_for_pdf = []
+
+                        for index in top_indices:
+
+                            top_plant, top_disease = format_prediction(
+                                class_names[int(index)]
+                            )
+
+                            score = float(
+                                probabilities[int(index)]
+                            )
+
+                            top_predictions_for_pdf.append({
+                                "plant": top_plant,
+                                "disease": top_disease,
+                                "score": score
+                            })
+
+                        info = disease_information.get(
+                            disease_name.lower(),
+                            {
+                                "symptoms": (
+                                    "Refer to the predicted disease category."
+                                ),
+                                "cause": (
+                                    "The model identified this category "
+                                    "based on learned image patterns."
+                                ),
+                                "care": [
+                                    "Inspect the plant carefully.",
+                                    "Monitor the affected leaves.",
+                                    "Consult a local agricultural expert."
+                                ]
+                            }
+                        )
+
+                        save_plant_history(
+                            user_id=st.session_state.user_id,
+                            plant_name=plant_name,
+                            disease_name=disease_name,
+                            confidence=confidence,
+                            image_name=uploaded_file.name
+                        )
+
+                        # GENERATE GRAD-CAM
+
+                        gradcam_overlay = None
+                        gradcam_heatmap = None
+                        gradcam_error = None
+
+                        try:
+
+                            (
+                                gradcam_heatmap,
+                                gradcam_overlay
+                            ) = generate_gradcam(
+                                image,
+                                predicted_index
+                            )
+
+                        except Exception as error:
+
+                            gradcam_error = str(error)
+
+                        st.session_state.last_analysis = {
+                            "image": image,
+                            "plant_name": plant_name,
+                            "disease_name": disease_name,
+                            "confidence": confidence,
+                            "predicted_index": predicted_index,
+                            "top_predictions": top_predictions_for_pdf,
+                            "info": info,
+                            "gradcam_heatmap": gradcam_heatmap,
+                            "gradcam_overlay": gradcam_overlay,
+                            "gradcam_error": gradcam_error,
+                            "filename": uploaded_file.name
+                        }
+
+                    st.success(
+                        "Leaf analysis completed successfully!"
+                    )
+
+                except Exception as error:
+
+                    st.error(
+                        f"Prediction could not be completed: {error}"
+                    )
+
+                    st.info(
+                        "Check that the trained model and class_names.json "
+                        "exist inside the model folder."
+                    )
+
+        # DISPLAY SAVED ANALYSIS
+
+        analysis = st.session_state.last_analysis
+
+        if analysis is not None:
+
+            image = analysis["image"]
+            plant_name = analysis["plant_name"]
+            disease_name = analysis["disease_name"]
+            confidence = analysis["confidence"]
+            top_predictions_for_pdf = analysis["top_predictions"]
+            info = analysis["info"]
+
+            st.markdown("---")
+
+            st.markdown("""
+            <div class="section-heading">
+                🌿 ANALYSIS RESULTS
+            </div>
+            """, unsafe_allow_html=True)
+
+            if confidence < 0.60:
+
+                st.warning(
+                    "The model is uncertain about this prediction. "
+                    "Please try a clearer leaf image and verify the result "
+                    "with an agricultural expert."
+                )
+
+            result_column1, result_column2 = st.columns(2)
+
+            with result_column1:
+
+                st.markdown("### 🌿 Predicted Plant")
+                st.success(plant_name)
+
+            with result_column2:
+
+                st.markdown("### 🌿 Predicted Category")
+                st.info(disease_name)
+
+            # MODEL CONFIDENCE
+
+            st.markdown("### 🌿 Model Confidence")
+
+            st.progress(confidence)
+
+            st.write(
+                f"Prediction confidence: **{confidence * 100:.2f}%**"
+            )
+
+            st.caption(
+                "Confidence is the model's output probability, "
+                "not a guarantee of diagnostic correctness."
+            )
+
+            # TOP THREE PREDICTIONS
+
+            st.markdown("### Top 3 Model Predictions")
+
+            for prediction in top_predictions_for_pdf:
+
+                st.write(
+                    f'**{prediction["plant"]} - '
+                    f'{prediction["disease"]}** '
+                    f'({prediction["score"] * 100:.2f}%)'
+                )
+
+                st.progress(prediction["score"])
+
+            # GRAD-CAM EXPLAINABILITY
+
+            st.markdown("---")
+
+            st.markdown("""
+            <div class="section-heading">
+                🧠 AI EXPLAINABILITY - GRAD-CAM
+            </div>
+            """, unsafe_allow_html=True)
+
+            st.markdown(
+                """
+                Grad-CAM creates a visual heatmap showing the image
+                regions that influenced the model's prediction.
+                """
+            )
+
+            if analysis["gradcam_overlay"] is not None:
+
+                cam_column1, cam_column2 = st.columns(2)
+
+                with cam_column1:
+
+                    st.image(
+                        image,
+                        caption="Original Leaf Image",
+                        width=300
+                    )
+
+                with cam_column2:
+
+                    st.image(
+                        analysis["gradcam_overlay"],
+                        caption="Grad-CAM Highlighted Image",
+                        width=300
+                    )
+
+                st.markdown("### 🔥 Grad-CAM Heatmap")
 
                 st.image(
-                    uploaded_image,
-                    caption="Uploaded Leaf Image",
-                    use_container_width=True
+                    analysis["gradcam_heatmap"],
+                    caption="Influential Regions Highlighted on the Leaf",
+                    width=300
                 )
 
-            except Exception:
-                st.error(
-                    "Unable to open this image. Please upload another image."
+                st.caption(
+                    "The coloured regions indicate areas that influenced "
+                    "the model's prediction. They should not be interpreted "
+                    "as an exact measurement of diseased tissue."
                 )
 
-    # --------------------------------
-    # RUN MODEL PREDICTION
-    # --------------------------------
+            else:
 
-    if predict_button:
+                st.warning(
+                    "The prediction was successful, but Grad-CAM could "
+                    "not be generated for this model."
+                )
 
-        if uploaded_file is None:
-            st.warning(
-                "Please upload a leaf image first."
+                if analysis["gradcam_error"]:
+
+                    st.caption(
+                        f"Grad-CAM detail: {analysis['gradcam_error']}"
+                    )
+
+            # SYMPTOMS AND CARE
+
+            st.markdown("---")
+
+            st.markdown("""
+            <div class="section-heading">
+                🌿 PLANT HEALTH INFORMATION
+            </div>
+            """, unsafe_allow_html=True)
+
+            st.markdown("### Symptoms")
+            st.write(info["symptoms"])
+
+            st.markdown("### Possible Cause")
+            st.write(info["cause"])
+
+            st.markdown("### 🌿 General Care Recommendations")
+
+            for recommendation in info["care"]:
+                st.markdown(f"- {recommendation}")
+
+            # DOWNLOAD RESULTS AS PDF
+
+            st.markdown("---")
+
+            st.markdown(
+                "### 🌿 Download Your Analysis Report"
+            )
+
+            pdf_bytes = create_results_pdf(
+                image=image,
+                plant_name=plant_name,
+                disease_name=disease_name,
+                confidence=confidence,
+                top_predictions=top_predictions_for_pdf,
+                info=info
+            )
+
+            safe_plant_name = re.sub(
+                r"[^a-zA-Z0-9_-]",
+                "_",
+                plant_name
+            )
+
+            safe_disease_name = re.sub(
+                r"[^a-zA-Z0-9_-]",
+                "_",
+                disease_name
+            )
+
+            report_filename = (
+                f"leaf_analysis_{safe_plant_name}_"
+                f"{safe_disease_name}.pdf"
+            )
+
+            st.download_button(
+                label="DOWNLOAD RESULTS AS PDF",
+                data=pdf_bytes,
+                file_name=report_filename,
+                mime="application/pdf",
+                use_container_width=True
+            )
+
+    # ================================================
+    # TAB 2 - PLANT HEALTH HISTORY
+    # ================================================
+
+    with history_tab:
+
+        st.markdown("""
+        <div class="section-heading">
+            📊 YOUR PLANT HEALTH HISTORY
+        </div>
+
+        <div class="hero-description">
+            View your previously analysed leaves and their prediction results.
+        </div>
+        """, unsafe_allow_html=True)
+
+        history_records = get_plant_history(
+            st.session_state.user_id
+        )
+
+        if not history_records:
+
+            st.info(
+                "No plant analysis history is available yet. "
+                "Analyse your first leaf image to see it here."
             )
 
         else:
 
-            try:
+            total_analyses = len(history_records)
 
-                with st.spinner(
-                    "AI model is analysing your leaf image..."
-                ):
+            healthy_count = sum(
+                1 for record in history_records
+                if format_history_disease(
+                    record["disease_name"]
+                ).lower() == "healthy"
+            )
 
-                    model, class_names = load_leaf_model()
+            other_count = total_analyses - healthy_count
 
-                    uploaded_file.seek(0)
-                    image = Image.open(uploaded_file).convert("RGB")
+            metric1, metric2, metric3 = st.columns(3)
 
-                    processed_image = preprocess_leaf_image(image)
+            with metric1:
 
-                    probabilities = model.predict(
-                        processed_image,
-                        verbose=0
-                    )[0]
+                st.metric(
+                    "Total Analyses",
+                    total_analyses
+                )
 
-                    predicted_index = int(np.argmax(probabilities))
-                    confidence = float(probabilities[predicted_index])
-                    predicted_label = class_names[predicted_index]
+            with metric2:
 
-                    plant_name, disease_name = format_prediction(
-                        predicted_label
+                st.metric(
+                    "Healthy Predictions",
+                    healthy_count
+                )
+
+            with metric3:
+
+                st.metric(
+                    "Other Predictions",
+                    other_count
+                )
+
+            st.markdown("---")
+
+            st.markdown("### Previous Analyses")
+
+            for record in history_records:
+
+                safe_plant = html.escape(
+                    str(record["plant_name"]).strip().title()
+                )
+
+                safe_disease = html.escape(
+                    format_history_disease(
+                        record["disease_name"]
                     )
-
-                    top_indices = np.argsort(probabilities)[::-1][:3]
-
-                # --------------------------------
-                # ANALYSIS RESULTS
-                # --------------------------------
-
-                st.markdown("---")
-
-                st.markdown("""
-                <div class="section-heading">
-                    🌿 ANALYSIS RESULTS
-                </div>
-                """, unsafe_allow_html=True)
-
-                if confidence < 0.60:
-                    st.warning(
-                        "The model is uncertain about this prediction. "
-                        "Please try a clearer leaf image and verify the result "
-                        "with an agricultural expert."
-                    )
-
-                result_column1, result_column2 = st.columns(2)
-
-                with result_column1:
-                    st.markdown("### 🌿 Predicted Plant")
-                    st.success(plant_name)
-
-                with result_column2:
-                    st.markdown("### 🌿 Predicted Category")
-                    st.info(disease_name)
-
-                # --------------------------------
-                # MODEL CONFIDENCE
-                # --------------------------------
-
-                st.markdown("### 🌿 Model Confidence")
-                st.progress(confidence)
-
-                st.write(
-                    f"Prediction confidence: **{confidence * 100:.2f}%**"
                 )
 
-                st.caption(
-                    "Confidence is the model's output probability, "
-                    "not a guarantee of diagnostic correctness."
+                safe_image_name = html.escape(
+                    str(record["image_name"] or "Not available")
                 )
 
-                # --------------------------------
-                # TOP THREE PREDICTIONS
-                # --------------------------------
-
-                st.markdown("### Top 3 Model Predictions")
-
-                top_predictions_for_pdf = []
-
-                for index in top_indices:
-
-                    top_plant, top_disease = format_prediction(
-                        class_names[int(index)]
-                    )
-
-                    score = float(probabilities[int(index)])
-
-                    top_predictions_for_pdf.append({
-                        "plant": top_plant,
-                        "disease": top_disease,
-                        "score": score
-                    })
-
-                    st.write(
-                        f"**{top_plant} - “ {top_disease}** "
-                        f"({score * 100:.2f}%)"
-                    )
-
-                    st.progress(score)
-
-                # --------------------------------
-                # SYMPTOMS AND CARE
-                # --------------------------------
-
-                st.markdown("---")
-
-                st.markdown("""
-                <div class="section-heading">
-                    🌿 PLANT HEALTH INFORMATION
-                </div>
-                """, unsafe_allow_html=True)
-
-                info = disease_information.get(
-                    disease_name.lower(),
-                    {
-                        "symptoms": "Refer to the predicted disease category.",
-                        "cause": "The model identified this category based on learned image patterns.",
-                        "care": [
-                            "Inspect the plant carefully.",
-                            "Monitor the affected leaves.",
-                            "Consult a local agricultural expert."
-                        ]
-                    }
+                safe_date = html.escape(
+                    str(record["created_at"])
                 )
 
-                st.markdown("### Symptoms")
-                st.write(info["symptoms"])
-
-                st.markdown("### Possible Cause")
-                st.write(info["cause"])
-
-                st.markdown("### 🌿 General Care Recommendations")
-
-                for recommendation in info["care"]:
-                    st.markdown(f"- {recommendation}")
-
-                # --------------------------------
-                # DOWNLOAD RESULTS AS PDF
-                # --------------------------------
-
-                st.markdown("---")
-                st.markdown("### 🌿“ Download Your Analysis Report")
-
-                pdf_bytes = create_results_pdf(
-                    image=image,
-                    plant_name=plant_name,
-                    disease_name=disease_name,
-                    confidence=confidence,
-                    top_predictions=top_predictions_for_pdf,
-                    info=info
+                confidence_text = (
+                    f'{record["confidence"] * 100:.2f}%'
                 )
 
-                safe_plant_name = re.sub(
-                    r"[^a-zA-Z0-9_-]",
-                    "_",
-                    plant_name
+                st.markdown(
+                    f"""
+                    <div class="history-card">
+                        <div class="history-title">
+                            🌿 {safe_plant}
+                        </div>
+
+                        <div class="history-detail">
+                            <b>Predicted category:</b> {safe_disease}
+                        </div>
+
+                        <div class="history-detail">
+                            <b>Image:</b> {safe_image_name}
+                        </div>
+
+                        <div class="history-detail">
+                            <b>Date:</b> {safe_date}
+                        </div>
+
+                        <div class="history-confidence">
+                            Confidence: {confidence_text}
+                        </div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True
                 )
 
-                safe_disease_name = re.sub(
-                    r"[^a-zA-Z0-9_-]",
-                    "_",
-                    disease_name
-                )
+            st.markdown("---")
 
-                report_filename = (
-                    f"leaf_analysis_{safe_plant_name}_"
-                    f"{safe_disease_name}.pdf"
-                )
-
-                st.download_button(
-                    label=" DOWNLOAD RESULTS AS PDF",
-                    data=pdf_bytes,
-                    file_name=report_filename,
-                    mime="application/pdf",
-                    use_container_width=True
-                )
-
-            except Exception as error:
-
-                st.error(
-                    f"Prediction could not be completed: {error}"
-                )
-
-                st.info(
-                    "Check that the trained model and class_names.json "
-                    "exist inside the model folder."
-                )
+            st.caption(
+                "Your history is displayed for the currently logged-in account."
+            )
 
 
 # ================================================
@@ -1330,6 +2149,6 @@ st.markdown("---")
 st.markdown("""
 <div class="footer">
     🌿 AI LEAF CARE AND DISEASE DETECTION 🌿<br>
-    Powered by MobileNetV2 | TensorFlow |Streamlit
+    Powered by MobileNetV2 | TensorFlow | Streamlit
 </div>
 """, unsafe_allow_html=True)
