@@ -1,0 +1,10 @@
+venv/
+users.db
+__pycache__/
+*.pyc
+.env
+dataset/
+data_splits.csv
+app_backup.py/
+model/confusion_matrix.npy
+model/training_history.json

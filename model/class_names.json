@@ -1,0 +1,23 @@
+[
+    "mango__Anthracnose",
+    "mango__Bacterial_Canker",
+    "mango__Cutting_Weevil",
+    "mango__Die_Back",
+    "mango__Gall_Midge",
+    "mango__Healthy",
+    "mango__Powdery_Mildew",
+    "mango__Sooty_Mould",
+    "potato__Potato___Early_blight",
+    "potato__Potato___Late_blight",
+    "potato__Potato___healthy",
+    "tomato__Tomato___Bacterial_spot",
+    "tomato__Tomato___Early_blight",
+    "tomato__Tomato___Late_blight",
+    "tomato__Tomato___Leaf_Mold",
+    "tomato__Tomato___Septoria_leaf_spot",
+    "tomato__Tomato___Spider_mites Two-spotted_spider_mite",
+    "tomato__Tomato___Target_Spot",
+    "tomato__Tomato___Tomato_Yellow_Leaf_Curl_Virus",
+    "tomato__Tomato___Tomato_mosaic_virus",
+    "tomato__Tomato___healthy"
+]
