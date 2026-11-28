@@ -320,6 +320,7 @@ def format_prediction(label):
 # FORMAT OLD HISTORY DISEASE NAMES
 # ================================================
 
+
 def format_history_disease(disease_name):
 
     raw = str(disease_name).strip()
@@ -328,23 +329,27 @@ def format_history_disease(disease_name):
         return "Unknown"
 
     if "___" in raw:
-
-        disease = raw.split("___", 1)[1]
-
+        parts = raw.split("___", 1)
     elif "__" in raw:
-
-        disease = raw.split("__", 1)[1]
-
+        parts = raw.split("__", 1)
     else:
+        parts = [None, raw]
 
-        disease = raw
-
-    disease = disease.replace("_", " ").strip()
+    if len(parts) == 2 and parts[0]:
+        plant = parts[0].replace("_", " ").strip().title()
+        disease = parts[1].replace("_", " ").strip().title()
+    else:
+        plant = ""
+        disease = parts[-1].replace("_", " ").strip().title()
 
     if disease.lower() == "healthy":
-        return "Healthy"
+        disease = "Healthy"
 
-    return disease.title()
+    if plant:
+        return f"{plant} - {disease}"
+
+    return disease
+
 
 
 # ================================================
@@ -2050,7 +2055,7 @@ else:
                 1 for record in history_records
                 if format_history_disease(
                     record["disease_name"]
-                ).lower() == "healthy"
+                ).lower().endswith("healthy")
             )
 
             other_count = total_analyses - healthy_count
@@ -2081,7 +2086,10 @@ else:
             st.markdown("---")
 
             st.markdown("### Previous Analyses")
-
+            st.markdown(
+                       "<div style='color: lime; font-size: 20px;'>HTML RENDER TEST</div>",
+                         unsafe_allow_html=True
+)
             for record in history_records:
 
                 safe_plant = html.escape(
@@ -2105,33 +2113,31 @@ else:
                 confidence_text = (
                     f'{record["confidence"] * 100:.2f}%'
                 )
-
-                st.markdown(
+                st.html(
                     f"""
-                    <div class="history-card">
+                     <div class="history-card">
                         <div class="history-title">
-                            🌿 {safe_plant}
+                             🌿 {safe_plant}
                         </div>
 
                         <div class="history-detail">
                             <b>Predicted category:</b> {safe_disease}
-                        </div>
+                         </div>
 
-                        <div class="history-detail">
-                            <b>Image:</b> {safe_image_name}
-                        </div>
+                         <div class="history-detail">
+                             <b>Image:</b> {safe_image_name}
+                         </div>
 
-                        <div class="history-detail">
-                            <b>Date:</b> {safe_date}
-                        </div>
+                         <div class="history-detail">
+                             <b>Date:</b> {safe_date}
+                         </div>
 
-                        <div class="history-confidence">
-                            Confidence: {confidence_text}
-                        </div>
-                    </div>
-                    """,
-                    unsafe_allow_html=True
-                )
+                         <div class="history-confidence">
+                              Confidence: {confidence_text}
+                         </div>
+                      </div>
+                      """
+                    )
 
             st.markdown("---")
 

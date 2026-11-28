@@ -8,3 +8,4 @@ data_splits.csv
 app_backup.py/
 model/confusion_matrix.npy
 model/training_history.json
+leaf_env/
